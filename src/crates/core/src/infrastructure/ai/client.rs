@@ -112,6 +112,31 @@ impl AIClient {
         &self.config.format
     }
 
+    fn normalize_openai_endpoint(base_url: &str, format: &str) -> String {
+        let sanitized_base = base_url.trim().trim_end_matches('/');
+        let lower_base = sanitized_base.to_lowercase();
+
+        if lower_base.ends_with("/chat/completions") || lower_base.ends_with("/responses") {
+            return sanitized_base.to_string();
+        }
+
+        let endpoint = match format {
+            "openai" => "chat/completions",
+            "openai_responses" => "responses",
+            _ => return sanitized_base.to_string(),
+        };
+
+        if sanitized_base.is_empty() {
+            format!("/{endpoint}")
+        } else {
+            format!("{sanitized_base}/{endpoint}")
+        }
+    }
+
+    fn resolve_openai_endpoint(&self, format: &str) -> String {
+        Self::normalize_openai_endpoint(&self.config.base_url, format)
+    }
+
     /// Whether to inject the GLM-specific `tool_stream` request field.
     ///
     /// `tool_stream` is only required by GLM; other providers can do tool streaming without this field.
@@ -427,6 +452,10 @@ impl AIClient {
                 self.send_openai_stream(messages, tools, extra_body, max_tries)
                     .await
             }
+            "openai_responses" => {
+                self.send_openai_responses_stream(messages, tools, extra_body, max_tries)
+                    .await
+            }
             "anthropic" => {
                 self.send_anthropic_stream(messages, tools, extra_body, max_tries)
                     .await
@@ -449,10 +478,34 @@ impl AIClient {
         extra_body: Option<serde_json::Value>,
         max_tries: usize,
     ) -> Result<StreamResponse> {
-        let url = self.config.base_url.clone();
+        let url = self.resolve_openai_endpoint("openai");
+        self.send_openai_compatible_stream(messages, tools, extra_body, max_tries, &url)
+            .await
+    }
+
+    async fn send_openai_responses_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        extra_body: Option<serde_json::Value>,
+        max_tries: usize,
+    ) -> Result<StreamResponse> {
+        let url = self.resolve_openai_endpoint("openai_responses");
+        self.send_openai_compatible_stream(messages, tools, extra_body, max_tries, &url)
+            .await
+    }
+
+    async fn send_openai_compatible_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        extra_body: Option<serde_json::Value>,
+        max_tries: usize,
+        url: &str,
+    ) -> Result<StreamResponse> {
         debug!(
-            "OpenAI config: model={}, base_url={}, max_tries={}",
-            self.config.model, self.config.base_url, max_tries
+            "OpenAI config: model={}, base_url={}, request_url={}, max_tries={}",
+            self.config.model, self.config.base_url, url, max_tries
         );
 
         // Use OpenAI message converter
@@ -470,7 +523,7 @@ impl AIClient {
             let request_start_time = std::time::Instant::now();
 
             // Send request - apply request headers
-            let request_builder = self.apply_openai_headers(self.client.post(&url));
+            let request_builder = self.apply_openai_headers(self.client.post(url));
             let response_result = request_builder.json(&request_body).send().await;
 
             let response = match response_result {
@@ -866,5 +919,54 @@ impl AIClient {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AIClient;
+
+    #[test]
+    fn normalize_openai_endpoint_keeps_full_chat_endpoint() {
+        let normalized = AIClient::normalize_openai_endpoint(
+            "https://api.example.com/v1/chat/completions",
+            "openai",
+        );
+        assert_eq!(
+            normalized,
+            "https://api.example.com/v1/chat/completions".to_string()
+        );
+    }
+
+    #[test]
+    fn normalize_openai_endpoint_keeps_full_responses_endpoint() {
+        let normalized = AIClient::normalize_openai_endpoint(
+            "https://api.example.com/v1/responses/",
+            "openai_responses",
+        );
+        assert_eq!(normalized, "https://api.example.com/v1/responses".to_string());
+    }
+
+    #[test]
+    fn normalize_openai_endpoint_appends_chat_completions_for_openai_format() {
+        let normalized =
+            AIClient::normalize_openai_endpoint("https://api.example.com/v1/", "openai");
+        assert_eq!(
+            normalized,
+            "https://api.example.com/v1/chat/completions".to_string()
+        );
+    }
+
+    #[test]
+    fn normalize_openai_endpoint_appends_responses_for_openai_responses_format() {
+        let normalized =
+            AIClient::normalize_openai_endpoint("https://api.example.com/v1", "openai_responses");
+        assert_eq!(normalized, "https://api.example.com/v1/responses".to_string());
+    }
+
+    #[test]
+    fn normalize_openai_endpoint_unknown_format_returns_sanitized_base() {
+        let normalized = AIClient::normalize_openai_endpoint("https://api.example.com/v1/", "foo");
+        assert_eq!(normalized, "https://api.example.com/v1".to_string());
     }
 }
