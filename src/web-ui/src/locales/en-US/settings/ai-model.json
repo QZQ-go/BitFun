@@ -26,6 +26,14 @@
       "name": "Anthropic Claude",
       "description": "Anthropic Claude series models"
     },
+    "openai": {
+      "name": "OpenAI",
+      "description": "OpenAI official models (Responses preferred)",
+      "urlOptions": {
+        "responses": "Responses API (recommended)",
+        "chatCompletions": "Chat Completions (legacy-compatible)"
+      }
+    },
     "minimax": {
       "name": "MiniMax",
       "description": "MiniMax M2 series large language models"
@@ -146,6 +154,7 @@
   },
   "formats": {
     "openaiCompatible": "OpenAI Compatible",
+    "openaiResponses": "OpenAI Responses",
     "claudeApi": "Claude API"
   },
   "actions": {

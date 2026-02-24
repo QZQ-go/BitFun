@@ -140,9 +140,8 @@
     "format": {
       "label": "API Format",
       "placeholder": "Select API format",
-      "hint": "Most providers use OpenAI-compatible format"
+      "hint": "Most providers use OpenAI-compatible format; prefer OpenAI Responses for new OpenAI integrations"
     },
-    "createdByOnboarding": "Created during onboarding",
     "errors": {
       "connectionTestFailed": "Connection test failed"
     },

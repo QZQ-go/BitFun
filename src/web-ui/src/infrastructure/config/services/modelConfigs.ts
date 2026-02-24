@@ -9,6 +9,21 @@ const t = (key: string, options?: Record<string, unknown>) => i18nService.t(key,
 
 
 export const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
+  openai: {
+    id: 'openai',
+    name: t('settings/ai-model:providers.openai.name'),
+    baseUrl: 'https://api.openai.com/v1/responses',
+    format: 'openai_responses',
+    models: ['gpt-5', 'gpt-5-mini', 'gpt-4.1'],
+    requiresApiKey: true,
+    description: t('settings/ai-model:providers.openai.description'),
+    helpUrl: 'https://platform.openai.com/api-keys',
+    baseUrlOptions: [
+      { url: 'https://api.openai.com/v1/responses', format: 'openai_responses', note: 'responses' },
+      { url: 'https://api.openai.com/v1/chat/completions', format: 'openai', note: 'chatCompletions' }
+    ]
+  },
+
   anthropic: {
     id: 'anthropic',
     name: t('settings/ai-model:providers.anthropic.name'),
@@ -309,6 +324,8 @@ export const getFormatDisplayName = (format: ApiFormat): string => {
   switch (format) {
     case 'openai':
       return t('settings/ai-model:formats.openaiCompatible');
+    case 'openai_responses':
+      return t('settings/ai-model:formats.openaiResponses');
     case 'anthropic':
       return t('settings/ai-model:formats.claudeApi');
     default:

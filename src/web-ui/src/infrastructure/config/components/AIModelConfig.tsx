@@ -113,7 +113,7 @@ const AIModelConfig: React.FC = () => {
   }, [aiModels, selectedCategoryTab, searchQuery]);
 
   // Provider options with translations (must be at top level, before any conditional returns)
-  const providerOrder = ['zhipu', 'qwen', 'deepseek', 'volcengine', 'minimax', 'moonshot', 'anthropic'];
+  const providerOrder = ['openai', 'zhipu', 'qwen', 'deepseek', 'volcengine', 'minimax', 'moonshot', 'anthropic'];
   const providers = useMemo(() => {
     const sorted = Object.values(PROVIDER_TEMPLATES).sort((a, b) => {
       const indexA = providerOrder.indexOf(a.id);
@@ -671,6 +671,7 @@ const AIModelConfig: React.FC = () => {
                     placeholder={t('form.providerPlaceholder')}
                     options={[
                       { label: 'OpenAI', value: 'openai' },
+                      { label: 'OpenAI Responses', value: 'openai_responses' },
                       { label: 'Anthropic', value: 'anthropic' }
                     ]}
                   />
@@ -859,6 +860,7 @@ const AIModelConfig: React.FC = () => {
                     placeholder={t('form.providerPlaceholder')}
                     options={[
                       { label: 'OpenAI', value: 'openai' },
+                      { label: 'OpenAI Responses', value: 'openai_responses' },
                       { label: 'Anthropic', value: 'anthropic' }
                     ]}
                   />
@@ -1458,4 +1460,3 @@ const AIModelConfig: React.FC = () => {
 };
 
 export default AIModelConfig;
-

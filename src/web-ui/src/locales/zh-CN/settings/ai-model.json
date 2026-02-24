@@ -26,6 +26,14 @@
       "name": "Anthropic Claude",
       "description": "Anthropic Claude 系列模型"
     },
+    "openai": {
+      "name": "OpenAI",
+      "description": "OpenAI 官方模型（优先 Responses）",
+      "urlOptions": {
+        "responses": "Responses API（推荐）",
+        "chatCompletions": "Chat Completions（兼容旧版）"
+      }
+    },
     "minimax": {
       "name": "MiniMax",
       "description": "MiniMax M2 系列大语言模型"
@@ -146,6 +154,7 @@
   },
   "formats": {
     "openaiCompatible": "OpenAI 兼容",
+    "openaiResponses": "OpenAI Responses",
     "claudeApi": "Claude API"
   },
   "actions": {

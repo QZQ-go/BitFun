@@ -140,9 +140,8 @@
     "format": {
       "label": "API 格式",
       "placeholder": "选择 API 格式",
-      "hint": "大多数国产模型使用 OpenAI 兼容格式"
+      "hint": "大多数模型使用 OpenAI 兼容格式；新接入 OpenAI 官方建议优先使用 OpenAI Responses"
     },
-    "createdByOnboarding": "通过首次启动引导创建",
     "errors": {
       "connectionTestFailed": "Connection test failed"
     },
