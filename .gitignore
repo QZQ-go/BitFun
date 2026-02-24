@@ -62,6 +62,9 @@ tests/e2e/reports/
 # BitFun sandbox data - auto managed
 .bitfun/
 
+# Local personal working notes/samples/logs
+local/
+
 .cursor/rules/no-cargo.mdc
 
 ASSETS_LICENSES.md
