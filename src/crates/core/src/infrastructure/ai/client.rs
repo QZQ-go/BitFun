@@ -4,6 +4,7 @@
 
 use crate::infrastructure::ai::providers::anthropic::AnthropicMessageConverter;
 use crate::infrastructure::ai::providers::openai::OpenAIMessageConverter;
+use crate::infrastructure::ai::providers::openai::OpenAIResponsesMessageConverter;
 use crate::service::config::ProxyConfig;
 use crate::util::types::*;
 use crate::util::JsonChecker;
@@ -332,6 +333,70 @@ impl AIClient {
         request_body
     }
 
+    fn build_openai_responses_request_body(
+        &self,
+        input_items: Vec<serde_json::Value>,
+        response_tools: Option<Vec<serde_json::Value>>,
+        extra_body: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut request_body = serde_json::json!({
+            "model": self.config.model,
+            "input": input_items,
+            "stream": true,
+        });
+
+        request_body["thinking"] = serde_json::json!({
+            "type": if self.config.enable_thinking_process { "enabled" } else { "disabled" }
+        });
+
+        if let Some(max_tokens) = self.config.max_tokens {
+            request_body["max_output_tokens"] = serde_json::json!(max_tokens);
+        }
+
+        if let Some(extra) = extra_body {
+            if let Some(extra_obj) = extra.as_object() {
+                for (key, value) in extra_obj {
+                    request_body[key] = value.clone();
+                }
+                debug!(target: "ai::openai_responses_stream_request", "Applied extra_body overrides: {:?}", extra_obj.keys().collect::<Vec<_>>());
+            }
+        }
+
+        if let Some(request_obj) = request_body.as_object_mut() {
+            if let Some(existing_n) = request_obj.remove("n") {
+                warn!(
+                    target: "ai::openai_responses_stream_request",
+                    "Removed custom request field n={} because responses stream does not support multiple completions in this client",
+                    existing_n
+                );
+            }
+        }
+
+        debug!(target: "ai::openai_responses_stream_request",
+            "OpenAI responses stream request body (excluding tools):\n{}",
+            serde_json::to_string_pretty(&request_body).unwrap_or_else(|_| "serialization failed".to_string())
+        );
+
+        if let Some(tools) = response_tools {
+            let tool_names = tools
+                .iter()
+                .map(|tool| {
+                    tool.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            debug!(target: "ai::openai_responses_stream_request", "\ntools: {:?}", tool_names);
+            if !tools.is_empty() {
+                request_body["tools"] = serde_json::Value::Array(tools);
+                request_body["tool_choice"] = serde_json::Value::String("auto".to_string());
+            }
+        }
+
+        request_body
+    }
+
     /// Build an Anthropic-format request body
     fn build_anthropic_request_body(
         &self,
@@ -479,7 +544,7 @@ impl AIClient {
         max_tries: usize,
     ) -> Result<StreamResponse> {
         let url = self.resolve_openai_endpoint("openai");
-        self.send_openai_compatible_stream(messages, tools, extra_body, max_tries, &url)
+        self.send_openai_compatible_stream(messages, tools, extra_body, max_tries, &url, false)
             .await
     }
 
@@ -491,7 +556,7 @@ impl AIClient {
         max_tries: usize,
     ) -> Result<StreamResponse> {
         let url = self.resolve_openai_endpoint("openai_responses");
-        self.send_openai_compatible_stream(messages, tools, extra_body, max_tries, &url)
+        self.send_openai_compatible_stream(messages, tools, extra_body, max_tries, &url, true)
             .await
     }
 
@@ -502,6 +567,7 @@ impl AIClient {
         extra_body: Option<serde_json::Value>,
         max_tries: usize,
         url: &str,
+        use_responses_api: bool,
     ) -> Result<StreamResponse> {
         debug!(
             "OpenAI config: model={}, base_url={}, request_url={}, max_tries={}",
@@ -509,12 +575,15 @@ impl AIClient {
         );
 
         // Use OpenAI message converter
-        let openai_messages = OpenAIMessageConverter::convert_messages(messages);
-        let openai_tools = OpenAIMessageConverter::convert_tools(tools);
-
-        // Build request body
-        let request_body =
-            self.build_openai_request_body(openai_messages, openai_tools, extra_body);
+        let request_body = if use_responses_api {
+            let input_items = OpenAIResponsesMessageConverter::convert_input(messages);
+            let response_tools = OpenAIResponsesMessageConverter::convert_tools(tools);
+            self.build_openai_responses_request_body(input_items, response_tools, extra_body)
+        } else {
+            let openai_messages = OpenAIMessageConverter::convert_messages(messages);
+            let openai_tools = OpenAIMessageConverter::convert_tools(tools);
+            self.build_openai_request_body(openai_messages, openai_tools, extra_body)
+        };
 
         let mut last_error = None;
         let base_wait_time_ms = 500;
@@ -925,6 +994,25 @@ impl AIClient {
 #[cfg(test)]
 mod tests {
     use super::AIClient;
+    use crate::util::types::AIConfig;
+
+    fn build_test_client() -> AIClient {
+        AIClient::new(AIConfig {
+            name: "test".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "test-key".to_string(),
+            model: "gpt-4.1".to_string(),
+            format: "openai_responses".to_string(),
+            context_window: 128000,
+            max_tokens: Some(4096),
+            enable_thinking_process: false,
+            support_preserved_thinking: false,
+            custom_headers: None,
+            custom_headers_mode: None,
+            skip_ssl_verify: false,
+            custom_request_body: None,
+        })
+    }
 
     #[test]
     fn normalize_openai_endpoint_keeps_full_chat_endpoint() {
@@ -968,5 +1056,42 @@ mod tests {
     fn normalize_openai_endpoint_unknown_format_returns_sanitized_base() {
         let normalized = AIClient::normalize_openai_endpoint("https://api.example.com/v1/", "foo");
         assert_eq!(normalized, "https://api.example.com/v1".to_string());
+    }
+
+    #[test]
+    fn build_openai_responses_request_body_uses_input_and_tools() {
+        let client = build_test_client();
+        let input = vec![serde_json::json!({ "role": "user", "content": "hello" })];
+        let tools = Some(vec![serde_json::json!({
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get weather info",
+            "parameters": { "type": "object" }
+        })]);
+
+        let body = client.build_openai_responses_request_body(input, tools, None);
+        assert_eq!(body["model"], "gpt-4.1");
+        assert!(body.get("input").is_some());
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["tool_choice"], "auto");
+        assert!(body.get("tools").is_some());
+    }
+
+    #[test]
+    fn build_openai_responses_request_body_applies_extra_body_overrides() {
+        let client = build_test_client();
+        let input = vec![serde_json::json!({ "role": "user", "content": "hi" })];
+        let extra = Some(serde_json::json!({
+            "store": true,
+            "previous_response_id": "resp_abc123",
+            "stream": false,
+            "n": 2
+        }));
+
+        let body = client.build_openai_responses_request_body(input, None, extra);
+        assert_eq!(body["store"], true);
+        assert_eq!(body["previous_response_id"], "resp_abc123");
+        assert_eq!(body["stream"], false);
+        assert!(body.get("n").is_none());
     }
 }
