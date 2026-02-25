@@ -41,6 +41,16 @@ pub struct ExecutionEngine {
 }
 
 impl ExecutionEngine {
+    const MAX_CONTEXT_OVERFLOW_RECOVERY_ATTEMPTS: usize = 2;
+
+    fn is_context_window_exceeded_error_message(error_message: &str) -> bool {
+        let msg = error_message.to_lowercase();
+        msg.contains("context_length_exceeded")
+            || msg.contains("exceeds the context window")
+            || msg.contains("maximum context length")
+            || msg.contains("prompt is too long")
+    }
+
     pub fn new(
         round_executor: Arc<RoundExecutor>,
         event_queue: Arc<EventQueue>,
@@ -352,6 +362,7 @@ impl ExecutionEngine {
         let enable_thinking = ai_client.config.enable_thinking_process;
         let support_preserved_thinking = ai_client.config.support_preserved_thinking;
         let context_window = ai_client.config.context_window as usize;
+        let mut context_overflow_recovery_attempts = 0usize;
 
         // Loop to execute model rounds
         loop {
@@ -372,7 +383,7 @@ impl ExecutionEngine {
             let mut ai_messages = MessageHelper::convert_messages(&messages);
 
             // Check and compress before sending AI request
-            let current_tokens =
+            let mut current_tokens =
                 TokenCounter::estimate_request_tokens(&ai_messages, tool_definitions.as_deref());
             debug!(
                 "Round {} token usage before send: {} / {} tokens ({:.1}%)",
@@ -426,6 +437,7 @@ impl ExecutionEngine {
 
                         messages = compressed_messages;
                         ai_messages = compressed_ai_messages;
+                        current_tokens = compressed_tokens;
                     }
                     Ok(None) => {
                         debug!("All turns need to be kept, no compression performed");
@@ -465,7 +477,7 @@ impl ExecutionEngine {
                 messages.len()
             );
 
-            let round_result = self
+            let round_result = match self
                 .round_executor
                 .execute_round(
                     ai_client.clone(),
@@ -474,7 +486,77 @@ impl ExecutionEngine {
                     tool_definitions.clone(),
                     Some(context_window),
                 )
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    let err_message = e.to_string();
+                    let should_try_context_overflow_recovery = enable_context_compression
+                        && context_overflow_recovery_attempts
+                            < Self::MAX_CONTEXT_OVERFLOW_RECOVERY_ATTEMPTS
+                        && Self::is_context_window_exceeded_error_message(&err_message);
+
+                    if should_try_context_overflow_recovery {
+                        context_overflow_recovery_attempts += 1;
+                        let latest_tokens = TokenCounter::estimate_request_tokens(
+                            &MessageHelper::convert_messages(&messages),
+                            tool_definitions.as_deref(),
+                        );
+
+                        warn!(
+                            "Context window exceeded, attempting compression recovery: session={}, turn={}, round={}, attempt={}/{}, tokens={} / {}",
+                            context.session_id,
+                            context.dialog_turn_id,
+                            round_index,
+                            context_overflow_recovery_attempts,
+                            Self::MAX_CONTEXT_OVERFLOW_RECOVERY_ATTEMPTS,
+                            latest_tokens,
+                            context_window,
+                        );
+
+                        match self
+                            .compress_messages(
+                                &context.session_id,
+                                &context.dialog_turn_id,
+                                context.subagent_parent_info.clone(),
+                                messages.clone(),
+                                latest_tokens,
+                                context_window,
+                                &tool_definitions,
+                                system_prompt_message.clone(),
+                            )
+                            .await
+                        {
+                            Ok(Some((compressed_tokens, compressed_messages, _))) => {
+                                info!(
+                                    "Context overflow recovery compression applied: messages {} -> {}, tokens {} -> {}",
+                                    messages.len(),
+                                    compressed_messages.len(),
+                                    latest_tokens,
+                                    compressed_tokens,
+                                );
+                                messages = compressed_messages;
+                                continue;
+                            }
+                            Ok(None) => {
+                                warn!(
+                                    "Context overflow recovery skipped: no additional compression possible"
+                                );
+                            }
+                            Err(compress_err) => {
+                                error!(
+                                    "Context overflow recovery compression failed: {}",
+                                    compress_err
+                                );
+                            }
+                        }
+                    }
+
+                    return Err(e);
+                }
+            };
+
+            context_overflow_recovery_attempts = 0;
 
             debug!(
                 "Model round completed: round_index={}, has_more_rounds={}, tool_calls={}",
@@ -734,5 +816,30 @@ impl ExecutionEngine {
     /// Emit event
     async fn emit_event(&self, event: AgenticEvent, priority: EventPriority) {
         let _ = self.event_queue.enqueue(event, Some(priority)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionEngine;
+
+    #[test]
+    fn detects_context_window_exceeded_errors() {
+        assert!(ExecutionEngine::is_context_window_exceeded_error_message(
+            "Responses SSE API error: context_length_exceeded"
+        ));
+        assert!(ExecutionEngine::is_context_window_exceeded_error_message(
+            "Your input exceeds the context window of this model"
+        ));
+        assert!(ExecutionEngine::is_context_window_exceeded_error_message(
+            "prompt is too long"
+        ));
+    }
+
+    #[test]
+    fn ignores_non_context_window_errors() {
+        assert!(!ExecutionEngine::is_context_window_exceeded_error_message(
+            "OpenAI Streaming API client error 401 Unauthorized"
+        ));
     }
 }

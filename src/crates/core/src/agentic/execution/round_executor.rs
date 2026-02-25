@@ -540,6 +540,10 @@ impl RoundExecutor {
             "invalid request",
             "bad request",
             "prompt is too long",
+            "context_length_exceeded",
+            "exceeds the context window",
+            "exceeds the model's maximum context length",
+            "maximum context length",
             "content policy",
             "proxy authentication required",
             "client error 400",
@@ -607,6 +611,12 @@ mod tests {
     #[test]
     fn rejects_sse_schema_error() {
         let msg = "Stream processing error: SSE data schema error: missing field choices";
+        assert!(!RoundExecutor::is_transient_network_error(msg));
+    }
+
+    #[test]
+    fn rejects_context_window_exceeded_error() {
+        let msg = "Responses SSE API error: Your input exceeds the context window of this model. code=context_length_exceeded";
         assert!(!RoundExecutor::is_transient_network_error(msg));
     }
 }
