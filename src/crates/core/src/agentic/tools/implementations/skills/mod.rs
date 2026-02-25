@@ -12,4 +12,3 @@ pub use types::{SkillData, SkillInfo, SkillLocation};
 pub fn get_skill_registry() -> &'static SkillRegistry {
     SkillRegistry::global()
 }
-
