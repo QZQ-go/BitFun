@@ -42,6 +42,26 @@ fn should_treat_stream_close_as_success(
     saw_response_completed || saw_meaningful_output
 }
 
+fn cache_tool_call_name(
+    call_id: Option<&str>,
+    item_id: Option<&str>,
+    name: Option<&str>,
+    call_name_by_id: &mut HashMap<String, String>,
+) {
+    let Some(name) = name.filter(|n| !n.is_empty()) else {
+        return;
+    };
+
+    if let Some(call_id) = call_id.filter(|id| !id.is_empty()) {
+        call_name_by_id.insert(call_id.to_string(), name.to_string());
+        return;
+    }
+
+    if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+        call_name_by_id.insert(item_id.to_string(), name.to_string());
+    }
+}
+
 pub async fn handle_openai_responses_stream(
     response: Response,
     tx_event: mpsc::UnboundedSender<Result<UnifiedResponse>>,
@@ -175,12 +195,12 @@ pub async fn handle_openai_responses_stream(
 
                 saw_meaningful_output = true;
 
-                if let (Some(call_id), Some(name)) = (
-                    event.item.call_id.as_ref().filter(|id| !id.is_empty()),
-                    event.item.name.as_ref().filter(|name| !name.is_empty()),
-                ) {
-                    call_name_by_id.insert(call_id.to_string(), name.to_string());
-                }
+                cache_tool_call_name(
+                    event.item.call_id.as_deref(),
+                    event.item.id.as_deref(),
+                    event.item.name.as_deref(),
+                    &mut call_name_by_id,
+                );
 
                 if let (Some(item_id), Some(call_id)) = (
                     event.item.id.as_ref().filter(|id| !id.is_empty()),
@@ -264,9 +284,12 @@ pub async fn handle_openai_responses_stream(
                     call_id_by_item_id.insert(item_id.to_string(), call_id.to_string());
                 }
 
-                if let Some(name) = event.name.as_ref().filter(|name| !name.is_empty()) {
-                    call_name_by_id.insert(resolved_call_id.clone(), name.to_string());
-                }
+                cache_tool_call_name(
+                    Some(resolved_call_id.as_str()),
+                    event.item_id.as_deref(),
+                    event.name.as_deref(),
+                    &mut call_name_by_id,
+                );
 
                 let _ = tx_event.send(Ok(event.into_unified_response(resolved_call_id)));
             }
@@ -354,7 +377,7 @@ pub async fn handle_openai_responses_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_call_id, should_treat_stream_close_as_success};
+    use super::{cache_tool_call_name, resolve_call_id, should_treat_stream_close_as_success};
     use std::collections::HashMap;
 
     #[test]
@@ -404,5 +427,27 @@ mod tests {
     #[test]
     fn stream_close_without_terminal_or_output_is_error() {
         assert!(!should_treat_stream_close_as_success(false, false));
+    }
+
+    #[test]
+    fn cache_tool_call_name_prefers_call_id() {
+        let mut map = HashMap::new();
+
+        cache_tool_call_name(Some("call_1"), Some("item_1"), Some("read_file"), &mut map);
+
+        assert_eq!(map.get("call_1").map(String::as_str), Some("read_file"));
+        assert_eq!(map.get("item_1"), None);
+    }
+
+    #[test]
+    fn cache_tool_call_name_falls_back_to_item_id_when_call_id_missing() {
+        let mut map = HashMap::new();
+
+        cache_tool_call_name(None, Some("item_only"), Some("read_file"), &mut map);
+
+        assert_eq!(
+            map.get("item_only").map(String::as_str),
+            Some("read_file")
+        );
     }
 }

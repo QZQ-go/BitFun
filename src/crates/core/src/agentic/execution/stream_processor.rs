@@ -276,6 +276,13 @@ pub struct StreamProcessor {
 }
 
 impl StreamProcessor {
+    const UNKNOWN_TOOL_NAME: &'static str = "unknown_tool";
+
+    fn normalize_tool_name(name: Option<String>) -> String {
+        name.filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| Self::UNKNOWN_TOOL_NAME.to_string())
+    }
+
     pub fn new(event_queue: Arc<EventQueue>) -> Self {
         Self { event_queue }
     }
@@ -454,8 +461,7 @@ impl StreamProcessor {
                 // Clear previous tool_call state
                 ctx.force_finish_tool_call_buffer();
 
-                // Normally tool_name should not be empty
-                let tool_name = tool_call.name.unwrap_or_default();
+                let tool_name = Self::normalize_tool_name(tool_call.name);
                 debug!("Tool detected: {}", tool_name);
                 ctx.tool_call_buffer.tool_id = tool_id.clone();
                 ctx.tool_call_buffer.tool_name = tool_name.clone();

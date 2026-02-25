@@ -36,6 +36,8 @@ pub struct AIClient {
 }
 
 impl AIClient {
+    const UNKNOWN_TOOL_NAME: &'static str = "unknown_tool";
+
     fn is_codex_chatgpt_account_error(error: &anyhow::Error) -> bool {
         let msg = error.to_string().to_lowercase();
         msg.contains("codex with a chatgpt account")
@@ -519,6 +521,11 @@ impl AIClient {
             .to_string()
     }
 
+    fn normalize_tool_call_name(name: Option<String>) -> String {
+        name.filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| Self::UNKNOWN_TOOL_NAME.to_string())
+    }
+
     /// Send a streaming message request
     ///
     /// Returns `StreamResponse` with:
@@ -948,7 +955,7 @@ impl AIClient {
                         if let Some(tool_call_id) = tool_call.id {
                             if !tool_call_id.is_empty() {
                                 cur_tool_call_id = tool_call_id;
-                                cur_tool_call_name = tool_call.name.unwrap_or_default();
+                                cur_tool_call_name = Self::normalize_tool_call_name(tool_call.name);
                                 json_checker.reset();
                                 debug!("[send_message] Detected tool call: {}", cur_tool_call_name);
                             }
@@ -1218,5 +1225,21 @@ mod tests {
         assert_eq!(body["previous_response_id"], "resp_abc123");
         assert_eq!(body["stream"], false);
         assert!(body.get("n").is_none());
+    }
+
+    #[test]
+    fn normalize_tool_call_name_uses_fallback_for_empty_or_none() {
+        assert_eq!(
+            AIClient::normalize_tool_call_name(None),
+            "unknown_tool".to_string()
+        );
+        assert_eq!(
+            AIClient::normalize_tool_call_name(Some("   ".to_string())),
+            "unknown_tool".to_string()
+        );
+        assert_eq!(
+            AIClient::normalize_tool_call_name(Some("read".to_string())),
+            "read".to_string()
+        );
     }
 }

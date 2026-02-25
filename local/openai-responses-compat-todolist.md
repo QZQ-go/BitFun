@@ -496,6 +496,35 @@
 - 遗留问题：
   - 仍需在桌面端 UI 用同配置完成一次人工回归（验证 provider 实际回包时序）
 
+### 执行记录 - 2026-02-25 13:59
+
+- 完成任务：用户反馈修复（工具调用阶段 `input[].name` 为空导致 OpenAI Responses 400）+ 回归用例补齐
+- 实际改动文件：
+  - `src/crates/core/src/infrastructure/ai/providers/openai/responses_message_converter.rs`
+  - `src/crates/core/src/infrastructure/ai/client.rs`
+  - `src/crates/core/src/agentic/execution/stream_processor.rs`
+  - `src/crates/core/src/infrastructure/ai/ai_stream_handlers/src/stream_handler/openai_responses.rs`
+  - `local/openai-responses-compat-todolist.md`
+- 根因说明：
+  - 流式 tool call 在部分 provider 事件序列下可能拿不到 `name`，旧实现通过 `unwrap_or_default()` 将其落成空字符串
+  - 多轮回放历史时，`responses` 请求体中的 `function_call.name` 被带成 `""`，触发上游参数校验错误：`Invalid input[i].name: empty string`
+- 修复说明：
+  - 在 responses message converter 增加空值防护：空 `name` 回退 `unknown_tool`，空 `call_id` 回退稳定占位值
+  - 在 AIClient 和 StreamProcessor 两处统一工具名规范化，移除空 name 落地路径
+  - 在 responses SSE handler 增加 `cache_tool_call_name`，补齐 `item_id-only` 场景下的名称缓存回填
+  - 新增回归测试覆盖：空 `name`/空 `call_id`/`item_id-only` 名称缓存
+- 使用依据（Trace IDs）：BTF-003, BTF-004, DOC-002, DOC-004
+- 验证结果：
+  - `lsp_diagnostics(4 个改动 Rust 文件)`：pass（No diagnostics found）
+  - `cargo test -p ai_stream_handlers`：pass（24 passed）
+  - `cargo test -p ai_stream_handlers cache_tool_call_name_ -- --nocapture`：pass（2 passed）
+  - `cargo test -p bitfun-core convert_input_replaces_empty -- --nocapture`：pass（3 passed）
+  - `cargo test -p bitfun-core normalize_tool_call_name_uses_fallback_for_empty_or_none -- --nocapture`：pass（1 passed）
+  - `cargo check -p bitfun-core`：pass
+  - `cargo build -p bitfun-core`：pass
+- 遗留问题：
+  - 需要在桌面端按真实 provider 配置完成一次端到端手测，确认工具调用多轮回放不再出现空 name 校验失败
+
 ## 8. 建议分支策略
 
 - 建议分支名：`feat/openai-responses-compat`

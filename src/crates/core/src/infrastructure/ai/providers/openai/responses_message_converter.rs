@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 pub struct OpenAIResponsesMessageConverter;
 
 impl OpenAIResponsesMessageConverter {
+    const UNKNOWN_TOOL_NAME: &'static str = "unknown_tool";
+
     pub fn convert_input(messages: Vec<Message>) -> Vec<Value> {
         messages
             .into_iter()
@@ -70,11 +72,29 @@ impl OpenAIResponsesMessageConverter {
         }
 
         if let Some(tool_calls) = msg.tool_calls {
-            for tc in tool_calls {
+            for (index, tc) in tool_calls.into_iter().enumerate() {
+                let tool_name = if tc.name.trim().is_empty() {
+                    warn!(
+                        "[OpenAI Responses] Empty tool call name detected in assistant message, using fallback name"
+                    );
+                    Self::UNKNOWN_TOOL_NAME.to_string()
+                } else {
+                    tc.name
+                };
+
+                let call_id = if tc.id.trim().is_empty() {
+                    warn!(
+                        "[OpenAI Responses] Empty tool call id detected in assistant message, generating fallback call_id"
+                    );
+                    format!("call_missing_{}", index)
+                } else {
+                    tc.id
+                };
+
                 items.push(json!({
                     "type": "function_call",
-                    "call_id": tc.id,
-                    "name": tc.name,
+                    "call_id": call_id,
+                    "name": tool_name,
                     "arguments": serde_json::to_string(&tc.arguments).unwrap_or_else(|e| {
                         error!(
                             "[OpenAI Responses] Failed to serialize tool arguments: {}",
@@ -97,7 +117,15 @@ impl OpenAIResponsesMessageConverter {
     }
 
     fn build_tool_output_item(msg: Message) -> Value {
-        let call_id = msg.tool_call_id.unwrap_or_default();
+        let call_id = msg
+            .tool_call_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| {
+                warn!(
+                    "[OpenAI Responses] Empty tool_call_id in tool message, using fallback call_id"
+                );
+                "call_missing".to_string()
+            });
         let output = msg
             .content
             .unwrap_or_else(|| "Tool execution completed".to_string());
@@ -173,6 +201,70 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["name"], "get_weather");
+    }
+
+    #[test]
+    fn convert_input_replaces_empty_tool_call_name_with_fallback() {
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: None,
+            reasoning_content: None,
+            thinking_signature: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "".to_string(),
+                arguments: HashMap::new(),
+            }]),
+            tool_call_id: None,
+            name: None,
+        }];
+
+        let input = OpenAIResponsesMessageConverter::convert_input(messages);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["name"], "unknown_tool");
+        assert_eq!(input[0]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn convert_input_replaces_empty_tool_call_id_with_fallback() {
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: None,
+            reasoning_content: None,
+            thinking_signature: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "".to_string(),
+                name: "get_weather".to_string(),
+                arguments: HashMap::new(),
+            }]),
+            tool_call_id: None,
+            name: None,
+        }];
+
+        let input = OpenAIResponsesMessageConverter::convert_input(messages);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["name"], "get_weather");
+        assert_eq!(input[0]["call_id"], "call_missing_0");
+    }
+
+    #[test]
+    fn convert_input_replaces_empty_tool_message_call_id_with_fallback() {
+        let messages = vec![Message {
+            role: "tool".to_string(),
+            content: Some("ok".to_string()),
+            reasoning_content: None,
+            thinking_signature: None,
+            tool_calls: None,
+            tool_call_id: Some("".to_string()),
+            name: Some("get_weather".to_string()),
+        }];
+
+        let input = OpenAIResponsesMessageConverter::convert_input(messages);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_missing");
     }
 
     #[test]
