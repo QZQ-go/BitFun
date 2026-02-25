@@ -14,12 +14,18 @@ impl OpenAIResponsesMessageConverter {
 
     fn convert_single_message(msg: Message) -> Vec<Value> {
         match msg.role.as_str() {
-            "system" | "user" => vec![Self::build_role_message_item(msg.role.as_str(), msg.content)],
+            "system" | "user" => vec![Self::build_role_message_item(
+                msg.role.as_str(),
+                msg.content,
+            )],
             "assistant" => Self::build_assistant_items(msg),
             "tool" => vec![Self::build_tool_output_item(msg)],
             _ => {
                 warn!("[OpenAI Responses] Unknown message role: {}", msg.role);
-                vec![Self::build_role_message_item(msg.role.as_str(), msg.content)]
+                vec![Self::build_role_message_item(
+                    msg.role.as_str(),
+                    msg.content,
+                )]
             }
         }
     }
@@ -92,7 +98,9 @@ impl OpenAIResponsesMessageConverter {
 
     fn build_tool_output_item(msg: Message) -> Value {
         let call_id = msg.tool_call_id.unwrap_or_default();
-        let output = msg.content.unwrap_or_else(|| "Tool execution completed".to_string());
+        let output = msg
+            .content
+            .unwrap_or_else(|| "Tool execution completed".to_string());
 
         json!({
             "type": "function_call_output",
