@@ -76,6 +76,11 @@ Add dedicated `responses` request builder + stream handler. Do not patch old cha
   - When only `item_id` is present, resolve `item_id -> call_id` from prior
     `response.output_item.*` events; if mapping is unavailable, fall back to
     using `item_id` as the tool-call identifier to avoid hard failure.
+- Compatibility requirement for stream termination:
+  - If SSE closes without `response.completed`, treat it as success when
+    meaningful output/tool-call events were already observed.
+  - Keep hard-fail behavior only for empty/incomplete streams or explicit
+    `response.failed`/`error` events.
 - Map to unified internal response shape so upper layers remain format-agnostic.
 
 ### Phase 5: Validation
@@ -103,6 +108,8 @@ Add dedicated `responses` request builder + stream handler. Do not patch old cha
 - Config + migration docs are updated.
 - Responses parser tolerates provider schema variants for
   `function_call_arguments.*` (missing `call_id`, item-id-based deltas).
+- Responses parser tolerates provider stream-close variants (missing
+  `response.completed` with non-empty prior output).
 
 ## 6. Risks and Mitigation
 
@@ -128,6 +135,12 @@ Add dedicated `responses` request builder + stream handler. Do not patch old cha
   for item-id-only payloads.
 - Rollback: keep stream alive and ignore malformed deltas instead of aborting
   the full response.
+
+### R5: Provider closes SSE before `response.completed`
+
+- Mitigation: classify stream close as success when prior meaningful output was
+  observed; otherwise keep original failure semantics.
+- Rollback: re-enable strict `response.completed` requirement for all providers.
 
 ## 7. Suggested Branch and PR Split
 

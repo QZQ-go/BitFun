@@ -469,6 +469,33 @@
 - 遗留问题：
   - 仍需用户在桌面端完成同配置实测确认（链路已启动供验证）
 
+### 执行记录 - 2026-02-25 12:36
+
+- 完成任务：连接失败修复（`builder error` + `Responses SSE stream closed before response completed`）+ 文档回填
+- 实际改动文件：
+  - `src/crates/core/src/util/types/config.rs`
+  - `src/crates/core/src/infrastructure/ai/client.rs`
+  - `src/crates/core/src/infrastructure/ai/ai_stream_handlers/src/stream_handler/openai_responses.rs`
+  - `local/test-openai-responses-config-chain.mjs`
+  - `docs/rfcs/openai-responses-compat.md`
+  - `local/openai-responses-compat-todolist.md`
+- 根因说明：
+  - `builder error`：配置中 `api_key/base_url/model/format/custom_headers` 含空白或非法头字段时，`reqwest` builder 可能在发请求前失败。
+  - `SSE stream closed before response completed`：部分 OpenAI-Compatible provider 会在已有有效增量输出后直接关闭 SSE，未发送 `response.completed`。
+- 修复说明：
+  - 在 `AIModelConfig -> AIConfig` 转换阶段统一 trim 关键字段，并清洗 `custom_headers/custom_headers_mode/custom_request_body`。
+  - 在 AI client header 注入阶段增加 header 名/值合法性过滤，避免非法自定义头触发 builder 失败。
+  - 在 Responses stream handler 中引入“有意义输出即成功结束”判定：若未见 `response.completed` 但已收到有效输出/tool-call 增量，SSE 提前关闭不再硬失败。
+  - 同步更新本地链路脚本，保持与后端一致的输入清洗策略。
+- 验证结果：
+  - `cargo test -p ai_stream_handlers`：pass（22 passed）
+  - `cargo test -p bitfun-core try_from_model_config_`：pass（3 passed）
+  - `cargo test -p bitfun-core build_openai_`：pass（5 passed）
+  - `cargo check -p bitfun-core`：pass（仅既有 warning）
+  - `node local/test-openai-responses-config-chain.mjs`（脏输入：空格/换行）: pass
+- 遗留问题：
+  - 仍需在桌面端 UI 用同配置完成一次人工回归（验证 provider 实际回包时序）
+
 ## 8. 建议分支策略
 
 - 建议分支名：`feat/openai-responses-compat`
