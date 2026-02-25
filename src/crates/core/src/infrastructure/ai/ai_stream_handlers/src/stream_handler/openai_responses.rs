@@ -16,6 +16,25 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+fn resolve_call_id(
+    call_id: Option<&str>,
+    item_id: Option<&str>,
+    call_id_by_item_id: &HashMap<String, String>,
+) -> Option<String> {
+    if let Some(call_id) = call_id.filter(|id| !id.is_empty()) {
+        return Some(call_id.to_string());
+    }
+
+    if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+        return call_id_by_item_id
+            .get(item_id)
+            .cloned()
+            .or_else(|| Some(item_id.to_string()));
+    }
+
+    None
+}
+
 pub async fn handle_openai_responses_stream(
     response: Response,
     tx_event: mpsc::UnboundedSender<Result<UnifiedResponse>>,
@@ -24,6 +43,7 @@ pub async fn handle_openai_responses_stream(
     let mut stream = response.bytes_stream().eventsource();
     let idle_timeout = Duration::from_secs(600);
     let mut call_name_by_id: HashMap<String, String> = HashMap::new();
+    let mut call_id_by_item_id: HashMap<String, String> = HashMap::new();
 
     loop {
         let sse_event = timeout(idle_timeout, stream.next()).await;
@@ -135,6 +155,13 @@ pub async fn handle_openai_responses_stream(
                     call_name_by_id.insert(call_id.to_string(), name.to_string());
                 }
 
+                if let (Some(item_id), Some(call_id)) = (
+                    event.item.id.as_ref().filter(|id| !id.is_empty()),
+                    event.item.call_id.as_ref().filter(|id| !id.is_empty()),
+                ) {
+                    call_id_by_item_id.insert(item_id.to_string(), call_id.to_string());
+                }
+
                 if let Some(unified) = event.into_tool_call_unified_response() {
                     let _ = tx_event.send(Ok(unified));
                 }
@@ -154,8 +181,19 @@ pub async fn handle_openai_responses_stream(
                         }
                     };
 
-                let name = call_name_by_id.get(&event.call_id).cloned();
-                let unified = event.into_unified_response_with_name(name);
+                let resolved_call_id =
+                    resolve_call_id(event.call_id.as_deref(), event.item_id.as_deref(), &call_id_by_item_id);
+
+                let Some(resolved_call_id) = resolved_call_id else {
+                    warn!(
+                        "Skipping function_call_arguments.delta without call_id/item_id: {}",
+                        raw
+                    );
+                    continue;
+                };
+
+                let name = call_name_by_id.get(&resolved_call_id).cloned();
+                let unified = event.into_unified_response_with_name(resolved_call_id, name);
                 let _ = tx_event.send(Ok(unified));
             }
             "response.function_call_arguments.done" => {
@@ -173,11 +211,29 @@ pub async fn handle_openai_responses_stream(
                         }
                     };
 
-                if let Some(name) = event.name.as_ref().filter(|name| !name.is_empty()) {
-                    call_name_by_id.insert(event.call_id.clone(), name.to_string());
+                let resolved_call_id =
+                    resolve_call_id(event.call_id.as_deref(), event.item_id.as_deref(), &call_id_by_item_id);
+
+                let Some(resolved_call_id) = resolved_call_id else {
+                    warn!(
+                        "Skipping function_call_arguments.done without call_id/item_id: {}",
+                        raw
+                    );
+                    continue;
+                };
+
+                if let (Some(item_id), Some(call_id)) = (
+                    event.item_id.as_ref().filter(|id| !id.is_empty()),
+                    event.call_id.as_ref().filter(|id| !id.is_empty()),
+                ) {
+                    call_id_by_item_id.insert(item_id.to_string(), call_id.to_string());
                 }
 
-                let _ = tx_event.send(Ok(event.into_unified_response()));
+                if let Some(name) = event.name.as_ref().filter(|name| !name.is_empty()) {
+                    call_name_by_id.insert(resolved_call_id.clone(), name.to_string());
+                }
+
+                let _ = tx_event.send(Ok(event.into_unified_response(resolved_call_id)));
             }
             "response.completed" => {
                 let event: OpenAIResponsesCompletedEvent = match serde_json::from_value(event_json)
@@ -256,5 +312,45 @@ pub async fn handle_openai_responses_stream(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_call_id;
+    use std::collections::HashMap;
+
+    #[test]
+    fn resolve_call_id_prefers_explicit_call_id() {
+        let mut map = HashMap::new();
+        map.insert("item_1".to_string(), "call_1".to_string());
+
+        let resolved = resolve_call_id(Some("call_explicit"), Some("item_1"), &map);
+        assert_eq!(resolved.as_deref(), Some("call_explicit"));
+    }
+
+    #[test]
+    fn resolve_call_id_maps_item_id_to_call_id_when_available() {
+        let mut map = HashMap::new();
+        map.insert("item_1".to_string(), "call_1".to_string());
+
+        let resolved = resolve_call_id(None, Some("item_1"), &map);
+        assert_eq!(resolved.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn resolve_call_id_falls_back_to_item_id_when_mapping_missing() {
+        let map = HashMap::new();
+
+        let resolved = resolve_call_id(None, Some("item_only"), &map);
+        assert_eq!(resolved.as_deref(), Some("item_only"));
+    }
+
+    #[test]
+    fn resolve_call_id_returns_none_when_no_identifier_present() {
+        let map = HashMap::new();
+
+        let resolved = resolve_call_id(None, None, &map);
+        assert_eq!(resolved, None);
     }
 }

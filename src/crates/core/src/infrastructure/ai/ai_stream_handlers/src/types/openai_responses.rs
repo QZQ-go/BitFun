@@ -9,13 +9,15 @@ pub struct OpenAIResponsesOutputTextDeltaEvent {
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAIResponsesFunctionCallArgumentsDeltaEvent {
-    pub call_id: String,
+    pub call_id: Option<String>,
+    pub item_id: Option<String>,
     pub delta: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAIResponsesFunctionCallArgumentsDoneEvent {
-    pub call_id: String,
+    pub call_id: Option<String>,
+    pub item_id: Option<String>,
     pub name: Option<String>,
     pub arguments: String,
 }
@@ -27,6 +29,7 @@ pub struct OpenAIResponsesOutputItemEvent {
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAIResponsesOutputItem {
+    pub id: Option<String>,
     #[serde(rename = "type")]
     pub item_type: String,
     pub call_id: Option<String>,
@@ -143,13 +146,17 @@ impl OpenAIResponsesOutputItemEvent {
 }
 
 impl OpenAIResponsesFunctionCallArgumentsDeltaEvent {
-    pub fn into_unified_response_with_name(self, name: Option<String>) -> UnifiedResponse {
+    pub fn into_unified_response_with_name(
+        self,
+        resolved_call_id: String,
+        name: Option<String>,
+    ) -> UnifiedResponse {
         UnifiedResponse {
             text: None,
             reasoning_content: None,
             thinking_signature: None,
             tool_call: Some(UnifiedToolCall {
-                id: Some(self.call_id),
+                id: Some(resolved_call_id),
                 name,
                 arguments: Some(self.delta),
             }),
@@ -160,13 +167,13 @@ impl OpenAIResponsesFunctionCallArgumentsDeltaEvent {
 }
 
 impl OpenAIResponsesFunctionCallArgumentsDoneEvent {
-    pub fn into_unified_response(self) -> UnifiedResponse {
+    pub fn into_unified_response(self, resolved_call_id: String) -> UnifiedResponse {
         UnifiedResponse {
             text: None,
             reasoning_content: None,
             thinking_signature: None,
             tool_call: Some(UnifiedToolCall {
-                id: Some(self.call_id),
+                id: Some(resolved_call_id),
                 name: self.name,
                 arguments: Some(self.arguments),
             }),
@@ -212,7 +219,8 @@ fn map_response_status_to_finish_reason(status: String) -> String {
 mod tests {
     use super::{
         extract_responses_error_message, extract_responses_event_type,
-        OpenAIResponsesCompletedEvent,
+        OpenAIResponsesCompletedEvent, OpenAIResponsesFunctionCallArgumentsDeltaEvent,
+        OpenAIResponsesFunctionCallArgumentsDoneEvent,
     };
 
     #[test]
@@ -270,5 +278,37 @@ mod tests {
         });
 
         assert_eq!(extract_responses_error_message(&event), None);
+    }
+
+    #[test]
+    fn delta_event_deserializes_when_only_item_id_is_present() {
+        let raw = r#"{
+            "type": "response.function_call_arguments.delta",
+            "delta": "{\"",
+            "item_id": "fc_123"
+        }"#;
+
+        let event: OpenAIResponsesFunctionCallArgumentsDeltaEvent =
+            serde_json::from_str(raw).expect("delta event should deserialize with item_id only");
+
+        assert_eq!(event.call_id, None);
+        assert_eq!(event.item_id.as_deref(), Some("fc_123"));
+    }
+
+    #[test]
+    fn done_event_deserializes_when_only_item_id_is_present() {
+        let raw = r#"{
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_123",
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Beijing\"}"
+        }"#;
+
+        let event: OpenAIResponsesFunctionCallArgumentsDoneEvent =
+            serde_json::from_str(raw).expect("done event should deserialize with item_id only");
+
+        assert_eq!(event.call_id, None);
+        assert_eq!(event.item_id.as_deref(), Some("fc_123"));
+        assert_eq!(event.name.as_deref(), Some("get_weather"));
     }
 }
