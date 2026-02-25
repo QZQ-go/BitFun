@@ -28,7 +28,7 @@
     },
     "openai": {
       "name": "OpenAI",
-      "description": "OpenAI official models (Responses preferred)",
+      "description": "OpenAI official models",
       "urlOptions": {
         "responses": "Responses API (recommended)",
         "chatCompletions": "Chat Completions (legacy-compatible)"

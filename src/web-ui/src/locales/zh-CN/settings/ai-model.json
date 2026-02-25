@@ -28,7 +28,7 @@
     },
     "openai": {
       "name": "OpenAI",
-      "description": "OpenAI 官方模型（优先 Responses）",
+      "description": "OpenAI 官方模型",
       "urlOptions": {
         "responses": "Responses API（推荐）",
         "chatCompletions": "Chat Completions（兼容旧版）"

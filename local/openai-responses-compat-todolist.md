@@ -399,6 +399,50 @@
 - 遗留问题：
   - T5-2、T5-3 仍按上一条记录继续跟进
 
+### 执行记录 - 2026-02-25 10:55
+
+- 完成任务：用户反馈问题修复（OpenAI 文案精简 + Responses 兼容网关 `thinking` 参数报错修复）
+- 实际改动文件：
+  - `src/web-ui/src/locales/zh-CN/settings/ai-model.json`
+  - `src/web-ui/src/locales/en-US/settings/ai-model.json`
+  - `src/crates/core/src/infrastructure/ai/client.rs`
+  - `local/openai-responses-compat-todolist.md`
+- 修复说明：
+  - OpenAI 提供商描述去除“优先 Responses”括号提示，避免界面冗余
+  - `openai` / `openai_responses` 请求体不再默认发送 `thinking: { type: disabled }`
+  - 仅在 `enable_thinking_process = true` 时发送 `thinking: { type: enabled }`，提升 OpenAI-Compatible 网关兼容性（规避 `Unsupported parameter: thinking`）
+  - 新增/更新单元测试，覆盖 thinking 字段的条件注入行为
+- 验证结果：
+  - `lsp_diagnostics(client.rs + 2 个 locale 文件)`：pass
+  - `cargo test -p bitfun-core build_openai_ -- --nocapture`：pass（5 passed）
+  - `cargo build -p bitfun-core`：pass
+  - `cd src/web-ui && npm run type-check`：fail（仓库既有大量 TS 错误，非本次改动引入）
+  - `npm run build:web`：pass（存在既有 warning，不阻塞构建）
+- 遗留问题：
+  - 若第三方网关在开启 thinking 后依然不兼容，可在该配置中关闭“启用思考”或通过自定义请求体精确控制字段
+
+### 执行记录 - 2026-02-25 11:20
+
+- 完成任务：自定义模型连接失败问题修复（`openai_responses` 命中 Codex+ChatGPT 账号限制时报 400）
+- 实际改动文件：
+  - `src/crates/core/src/infrastructure/ai/client.rs`
+  - `src/web-ui/src/locales/en-US/settings/ai-model.json`
+  - `src/web-ui/src/locales/zh-CN/settings/ai-model.json`
+  - `local/openai-responses-compat-todolist.md`
+- 修复说明：
+  - 新增错误识别逻辑：当上游返回 `model is not supported when using Codex with a ChatGPT account`（或同类 Codex 限制语义）时，识别为可回退场景
+  - 在 `openai_responses` 流式调用失败后自动 fallback 到 `openai`（`/chat/completions`）重试，提升第三方 OpenAI-Compatible 网关在受限账户模式下的可用性
+  - 新增单测覆盖：
+    - 命中特征错误的识别
+    - 非相关错误不误判
+- 验证结果：
+  - `lsp_diagnostics(src/crates/core/src/infrastructure/ai/client.rs)`：pass
+  - `cargo test -p bitfun-core codex_chatgpt_account_error_detector`：pass（2 passed）
+  - `cargo check -p bitfun-core`：pass
+- 遗留问题：
+  - 该 fallback 是兼容兜底；若供应商后端强制走特定账户通道，仍建议优先使用其明确支持的 endpoint/model 组合
+  - 用户在对话中暴露了明文 API Key，需立即旋转/作废旧 Key
+
 ---
 
 ## 8. 建议分支策略

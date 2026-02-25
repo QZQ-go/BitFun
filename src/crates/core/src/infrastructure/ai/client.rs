@@ -33,6 +33,12 @@ pub struct AIClient {
 }
 
 impl AIClient {
+    fn is_codex_chatgpt_account_error(error: &anyhow::Error) -> bool {
+        let msg = error.to_string().to_lowercase();
+        msg.contains("codex with a chatgpt account")
+            || (msg.contains("not supported") && msg.contains("using codex"))
+    }
+
     /// Create an AIClient without proxy (backward compatible)
     pub fn new(config: AIConfig) -> Self {
         let skip_ssl_verify = config.skip_ssl_verify;
@@ -286,9 +292,11 @@ impl AIClient {
             request_body["tool_stream"] = serde_json::Value::Bool(true);
         }
 
-        request_body["thinking"] = serde_json::json!({
-            "type": if self.config.enable_thinking_process { "enabled" } else { "disabled" }
-        });
+        if self.config.enable_thinking_process {
+            request_body["thinking"] = serde_json::json!({
+                "type": "enabled"
+            });
+        }
 
         if let Some(max_tokens) = self.config.max_tokens {
             request_body["max_tokens"] = serde_json::json!(max_tokens);
@@ -347,9 +355,11 @@ impl AIClient {
             "stream": true,
         });
 
-        request_body["thinking"] = serde_json::json!({
-            "type": if self.config.enable_thinking_process { "enabled" } else { "disabled" }
-        });
+        if self.config.enable_thinking_process {
+            request_body["thinking"] = serde_json::json!({
+                "type": "enabled"
+            });
+        }
 
         if let Some(max_tokens) = self.config.max_tokens {
             request_body["max_output_tokens"] = serde_json::json!(max_tokens);
@@ -558,8 +568,39 @@ impl AIClient {
         max_tries: usize,
     ) -> Result<StreamResponse> {
         let url = self.resolve_openai_endpoint("openai_responses");
-        self.send_openai_compatible_stream(messages, tools, extra_body, max_tries, &url, true)
+        match self
+            .send_openai_compatible_stream(
+                messages.clone(),
+                tools.clone(),
+                extra_body.clone(),
+                max_tries,
+                &url,
+                true,
+            )
             .await
+        {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                if Self::is_codex_chatgpt_account_error(&err) {
+                    warn!(
+                        "Responses API rejected by upstream Codex account restriction, retrying with chat/completions endpoint"
+                    );
+                    let fallback_url = self.resolve_openai_endpoint("openai");
+                    return self
+                        .send_openai_compatible_stream(
+                            messages,
+                            tools,
+                            extra_body,
+                            max_tries,
+                            &fallback_url,
+                            false,
+                        )
+                        .await;
+                }
+
+                Err(err)
+            }
+        }
     }
 
     async fn send_openai_compatible_stream(
@@ -1002,7 +1043,7 @@ mod tests {
     use super::AIClient;
     use crate::util::types::AIConfig;
 
-    fn build_test_client() -> AIClient {
+    fn build_test_client_with_thinking(enable_thinking_process: bool) -> AIClient {
         AIClient::new(AIConfig {
             name: "test".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
@@ -1011,13 +1052,35 @@ mod tests {
             format: "openai_responses".to_string(),
             context_window: 128000,
             max_tokens: Some(4096),
-            enable_thinking_process: false,
+            enable_thinking_process,
             support_preserved_thinking: false,
             custom_headers: None,
             custom_headers_mode: None,
             skip_ssl_verify: false,
             custom_request_body: None,
         })
+    }
+
+    fn build_test_client() -> AIClient {
+        build_test_client_with_thinking(false)
+    }
+
+    #[test]
+    fn codex_chatgpt_account_error_detector_matches_expected_message() {
+        let error = anyhow::anyhow!(
+            "OpenAI Streaming API client error 400 Bad Request: model is not supported when using Codex with a ChatGPT account"
+        );
+
+        assert!(AIClient::is_codex_chatgpt_account_error(&error));
+    }
+
+    #[test]
+    fn codex_chatgpt_account_error_detector_ignores_unrelated_error() {
+        let error = anyhow::anyhow!(
+            "OpenAI Streaming API client error 401 Unauthorized: invalid_api_key"
+        );
+
+        assert!(!AIClient::is_codex_chatgpt_account_error(&error));
     }
 
     #[test]
@@ -1085,8 +1148,36 @@ mod tests {
         assert_eq!(body["model"], "gpt-4.1");
         assert!(body.get("input").is_some());
         assert_eq!(body["stream"], true);
+        assert!(body.get("thinking").is_none());
         assert_eq!(body["tool_choice"], "auto");
         assert!(body.get("tools").is_some());
+    }
+
+    #[test]
+    fn build_openai_responses_request_body_includes_thinking_only_when_enabled() {
+        let client = build_test_client_with_thinking(true);
+        let input = vec![serde_json::json!({ "role": "user", "content": "hello" })];
+
+        let body = client.build_openai_responses_request_body(input, None, None);
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn build_openai_request_body_omits_thinking_when_disabled() {
+        let client = build_test_client();
+        let messages = vec![serde_json::json!({ "role": "user", "content": "hi" })];
+
+        let body = client.build_openai_request_body(messages, None, None);
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn build_openai_request_body_includes_thinking_when_enabled() {
+        let client = build_test_client_with_thinking(true);
+        let messages = vec![serde_json::json!({ "role": "user", "content": "hi" })];
+
+        let body = client.build_openai_request_body(messages, None, None);
+        assert_eq!(body["thinking"]["type"], "enabled");
     }
 
     #[test]
