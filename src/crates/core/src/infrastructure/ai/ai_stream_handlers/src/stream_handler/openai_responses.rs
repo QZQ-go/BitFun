@@ -35,6 +35,13 @@ fn resolve_call_id(
     None
 }
 
+fn should_treat_stream_close_as_success(
+    saw_response_completed: bool,
+    saw_meaningful_output: bool,
+) -> bool {
+    saw_response_completed || saw_meaningful_output
+}
+
 pub async fn handle_openai_responses_stream(
     response: Response,
     tx_event: mpsc::UnboundedSender<Result<UnifiedResponse>>,
@@ -44,12 +51,26 @@ pub async fn handle_openai_responses_stream(
     let idle_timeout = Duration::from_secs(600);
     let mut call_name_by_id: HashMap<String, String> = HashMap::new();
     let mut call_id_by_item_id: HashMap<String, String> = HashMap::new();
+    let mut saw_response_completed = false;
+    let mut saw_meaningful_output = false;
 
     loop {
         let sse_event = timeout(idle_timeout, stream.next()).await;
         let sse = match sse_event {
             Ok(Some(Ok(sse))) => sse,
             Ok(None) => {
+                if should_treat_stream_close_as_success(
+                    saw_response_completed,
+                    saw_meaningful_output,
+                ) {
+                    if !saw_response_completed {
+                        warn!(
+                            "Responses SSE closed without response.completed; treating as success due to prior output"
+                        );
+                    }
+                    return;
+                }
+
                 let error_msg = "Responses SSE stream closed before response completed";
                 error!("{}", error_msg);
                 let _ = tx_event.send(Err(anyhow!(error_msg)));
@@ -130,6 +151,10 @@ pub async fn handle_openai_responses_stream(
                         }
                     };
 
+                if !event.delta.is_empty() {
+                    saw_meaningful_output = true;
+                }
+
                 let _ = tx_event.send(Ok(UnifiedResponse {
                     text: Some(event.delta),
                     ..Default::default()
@@ -147,6 +172,8 @@ pub async fn handle_openai_responses_stream(
                         return;
                     }
                 };
+
+                saw_meaningful_output = true;
 
                 if let (Some(call_id), Some(name)) = (
                     event.item.call_id.as_ref().filter(|id| !id.is_empty()),
@@ -181,6 +208,10 @@ pub async fn handle_openai_responses_stream(
                         }
                     };
 
+                if !event.delta.is_empty() {
+                    saw_meaningful_output = true;
+                }
+
                 let resolved_call_id =
                     resolve_call_id(event.call_id.as_deref(), event.item_id.as_deref(), &call_id_by_item_id);
 
@@ -210,6 +241,10 @@ pub async fn handle_openai_responses_stream(
                             return;
                         }
                     };
+
+                if !event.arguments.is_empty() {
+                    saw_meaningful_output = true;
+                }
 
                 let resolved_call_id =
                     resolve_call_id(event.call_id.as_deref(), event.item_id.as_deref(), &call_id_by_item_id);
@@ -247,6 +282,8 @@ pub async fn handle_openai_responses_stream(
                         return;
                     }
                 };
+
+                saw_response_completed = true;
 
                 let _ = tx_event.send(Ok(event.into_unified_response()));
             }
@@ -317,7 +354,7 @@ pub async fn handle_openai_responses_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_call_id;
+    use super::{resolve_call_id, should_treat_stream_close_as_success};
     use std::collections::HashMap;
 
     #[test]
@@ -352,5 +389,20 @@ mod tests {
 
         let resolved = resolve_call_id(None, None, &map);
         assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn stream_close_with_completed_event_is_success() {
+        assert!(should_treat_stream_close_as_success(true, false));
+    }
+
+    #[test]
+    fn stream_close_with_meaningful_output_is_success() {
+        assert!(should_treat_stream_close_as_success(false, true));
+    }
+
+    #[test]
+    fn stream_close_without_terminal_or_output_is_error() {
+        assert!(!should_treat_stream_close_as_success(false, false));
     }
 }

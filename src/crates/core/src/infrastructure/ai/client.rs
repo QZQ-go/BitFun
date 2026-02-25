@@ -14,7 +14,10 @@ use ai_stream_handlers::{
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use log::{debug, error, info, warn};
-use reqwest::{Client, Proxy};
+use reqwest::{
+    header::{HeaderName, HeaderValue},
+    Client, Proxy,
+};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -203,7 +206,24 @@ impl AIClient {
         if let Some(custom_headers) = &self.config.custom_headers {
             if !custom_headers.is_empty() {
                 for (key, value) in custom_headers {
-                    builder = builder.header(key.as_str(), value.as_str());
+                    let key = key.trim();
+                    if key.is_empty() {
+                        warn!("Skipping custom header with empty key");
+                        continue;
+                    }
+
+                    let Ok(header_name) = HeaderName::from_bytes(key.as_bytes()) else {
+                        warn!("Skipping custom header with invalid name: {}", key);
+                        continue;
+                    };
+
+                    let value = value.trim();
+                    let Ok(header_value) = HeaderValue::from_str(value) else {
+                        warn!("Skipping custom header with invalid value for key: {}", key);
+                        continue;
+                    };
+
+                    builder = builder.header(header_name, header_value);
                 }
             }
         }
@@ -226,9 +246,10 @@ impl AIClient {
             return self.apply_custom_headers(builder);
         }
 
+        let api_key = self.config.api_key.trim();
         builder = builder
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.config.api_key));
+            .header("Authorization", format!("Bearer {}", api_key));
 
         if has_custom_headers && is_merge_mode {
             builder = self.apply_custom_headers(builder);
@@ -255,12 +276,13 @@ impl AIClient {
         }
 
         builder = builder.header("Content-Type", "application/json");
+        let api_key = self.config.api_key.trim();
 
         if url.contains("bigmodel.cn") {
-            builder = builder.header("Authorization", format!("Bearer {}", self.config.api_key));
+            builder = builder.header("Authorization", format!("Bearer {}", api_key));
         } else {
             builder = builder
-                .header("x-api-key", &self.config.api_key)
+                .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01");
         }
 
