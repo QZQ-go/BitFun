@@ -8,7 +8,9 @@ use crate::infrastructure::ai::providers::openai::OpenAIResponsesMessageConverte
 use crate::service::config::ProxyConfig;
 use crate::util::types::*;
 use crate::util::JsonChecker;
-use ai_stream_handlers::{handle_anthropic_stream, handle_openai_stream, UnifiedResponse};
+use ai_stream_handlers::{
+    handle_anthropic_stream, handle_openai_responses_stream, handle_openai_stream, UnifiedResponse,
+};
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use log::{debug, error, info, warn};
@@ -673,7 +675,11 @@ impl AIClient {
             let (tx, rx) = mpsc::unbounded_channel();
             let (tx_raw, rx_raw) = mpsc::unbounded_channel();
 
-            tokio::spawn(handle_openai_stream(response, tx, Some(tx_raw)));
+            if use_responses_api {
+                tokio::spawn(handle_openai_responses_stream(response, tx, Some(tx_raw)));
+            } else {
+                tokio::spawn(handle_openai_stream(response, tx, Some(tx_raw)));
+            }
 
             return Ok(StreamResponse {
                 stream: Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)),
@@ -1032,7 +1038,10 @@ mod tests {
             "https://api.example.com/v1/responses/",
             "openai_responses",
         );
-        assert_eq!(normalized, "https://api.example.com/v1/responses".to_string());
+        assert_eq!(
+            normalized,
+            "https://api.example.com/v1/responses".to_string()
+        );
     }
 
     #[test]
@@ -1049,7 +1058,10 @@ mod tests {
     fn normalize_openai_endpoint_appends_responses_for_openai_responses_format() {
         let normalized =
             AIClient::normalize_openai_endpoint("https://api.example.com/v1", "openai_responses");
-        assert_eq!(normalized, "https://api.example.com/v1/responses".to_string());
+        assert_eq!(
+            normalized,
+            "https://api.example.com/v1/responses".to_string()
+        );
     }
 
     #[test]
