@@ -52,7 +52,7 @@ pub enum SystemError {
 ///
 /// # Example
 /// ```rust
-/// let result = check_command("git");
+/// let result = bitfun_core::service::check_command("git");
 /// if result.exists {
 ///     if let Some(path) = result.path.as_deref() {
 ///         println!("Git path: {}", path);
