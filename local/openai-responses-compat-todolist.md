@@ -525,6 +525,34 @@
 - 遗留问题：
   - 需要在桌面端按真实 provider 配置完成一次端到端手测，确认工具调用多轮回放不再出现空 name 校验失败
 
+### 执行记录 - 2026-02-25 14:30
+
+- 完成任务：用户反馈修复（配置后工具调用卡顿；todo 建立后中断并报 `context_length_exceeded`）+ 文档回填
+- 实际改动文件：
+  - `src/crates/core/src/agentic/execution/round_executor.rs`
+  - `src/crates/core/src/agentic/execution/execution_engine.rs`
+  - `local/openai-responses-compat-todolist.md`
+- 根因说明：
+  - `context_length_exceeded` 在 round retry 分类中被视为可重试流错误，导致先发生一次无效重试，体感为“工具调度卡顿”
+  - 重试失败后直接上抛为 `DialogTurnFailed`，流程进入 error/idle，表现为必须手动输入“继续”才能推进
+- 修复说明：
+  - 在 `RoundExecutor::is_transient_network_error` 中将上下文超窗类错误标记为**非瞬时错误**（`context_length_exceeded` / `exceeds the context window` / `maximum context length`）
+  - 在 `ExecutionEngine` 增加超窗识别与自动恢复路径：当命中上下文超窗错误时，自动触发上下文压缩并继续当前轮（最多 2 次恢复尝试）
+  - 新增单测覆盖：
+    - `round_executor::tests::rejects_context_window_exceeded_error`
+    - `execution_engine::tests::detects_context_window_exceeded_errors`
+    - `execution_engine::tests::ignores_non_context_window_errors`
+- 使用依据（Trace IDs）：BTF-003, BTF-004, DOC-002, DOC-003
+- 验证结果：
+  - `lsp_diagnostics(round_executor.rs / execution_engine.rs)`：pass（No diagnostics found）
+  - `cargo test -p bitfun-core round_executor::tests -- --nocapture`：pass（4 passed）
+  - `cargo test -p bitfun-core execution_engine::tests::detects_context_window_exceeded_errors -- --nocapture`：pass（1 passed）
+  - `cargo test -p bitfun-core round_executor::tests::rejects_context_window_exceeded_error -- --nocapture`：pass（1 passed）
+  - `cargo check -p bitfun-core`：pass
+  - `cargo build -p bitfun-core`：pass
+- 遗留问题：
+  - 若 provider 在超窗前已返回部分有效内容且随后异常断流，仍需结合真实网关做端到端回归，确认恢复策略与业务期望一致
+
 ## 8. 建议分支策略
 
 - 建议分支名：`feat/openai-responses-compat`
