@@ -68,8 +68,14 @@ Add dedicated `responses` request builder + stream handler. Do not patch old cha
 - Minimum supported events:
   - `response.output_text.delta`
   - `response.function_call_arguments.delta`
+  - `response.function_call_arguments.done`
   - `response.completed`
   - `error`
+- Compatibility requirement for tool-call argument events:
+  - Accept both `call_id` and `item_id` forms from OpenAI-compatible providers.
+  - When only `item_id` is present, resolve `item_id -> call_id` from prior
+    `response.output_item.*` events; if mapping is unavailable, fall back to
+    using `item_id` as the tool-call identifier to avoid hard failure.
 - Map to unified internal response shape so upper layers remain format-agnostic.
 
 ### Phase 5: Validation
@@ -95,6 +101,8 @@ Add dedicated `responses` request builder + stream handler. Do not patch old cha
 - Core and stream handler tests pass.
 - Web type-check and build pass.
 - Config + migration docs are updated.
+- Responses parser tolerates provider schema variants for
+  `function_call_arguments.*` (missing `call_id`, item-id-based deltas).
 
 ## 6. Risks and Mitigation
 
@@ -112,6 +120,14 @@ Add dedicated `responses` request builder + stream handler. Do not patch old cha
 
 - Mitigation: incremental buffering + JSON integrity checks.
 - Rollback: degrade tool-call streaming to full-payload parsing temporarily.
+
+### R4: OpenAI-compatible schema drift (`item_id` vs `call_id`)
+
+- Mitigation: make parser identifier resolution tolerant (`call_id` first,
+  then `item_id` mapping, then `item_id` fallback), and add regression tests
+  for item-id-only payloads.
+- Rollback: keep stream alive and ignore malformed deltas instead of aborting
+  the full response.
 
 ## 7. Suggested Branch and PR Split
 

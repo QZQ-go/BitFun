@@ -445,6 +445,30 @@
 
 ---
 
+### 执行记录 - 2026-02-25 11:52
+
+- 完成任务：Responses 兼容回归修复（`function_call_arguments.delta` 缺失 `call_id`）+ 文档回填
+- 实际改动文件：
+  - `src/crates/core/src/infrastructure/ai/ai_stream_handlers/src/types/openai_responses.rs`
+  - `src/crates/core/src/infrastructure/ai/ai_stream_handlers/src/stream_handler/openai_responses.rs`
+  - `docs/rfcs/openai-responses-compat.md`
+  - `local/openai-responses-compat-todolist.md`
+- 根因说明：
+  - 用户环境 provider 返回 `response.function_call_arguments.delta` 事件仅含 `item_id`，不含 `call_id`
+  - 旧实现中 `serde` 结构将 `call_id` 设为必填，导致流解析直接报错并中断
+  - 本地 `local/test-openai-responses-config-chain.mjs` 使用宽松事件解析，不强依赖 `call_id` 必填，因此出现“脚本成功、应用失败”的差异
+- 修复说明：
+  - `Delta/Done` 事件结构支持 `call_id?: Option<String>` 与 `item_id?: Option<String>`
+  - 新增 `item_id -> call_id` 关联解析（来自 `response.output_item.*`）
+  - 当映射缺失时回退使用 `item_id` 作为 tool call 标识，避免硬失败
+  - 新增回归测试覆盖 item-id-only 事件及 ID 解析优先级
+- 验证结果：
+  - `cargo test -p ai_stream_handlers`：pass（19 passed）
+  - `cargo check -p bitfun-core`：pass（仅既有 warning）
+  - `lsp_diagnostics(修改文件)`：pass
+- 遗留问题：
+  - 仍需用户在桌面端完成同配置实测确认（链路已启动供验证）
+
 ## 8. 建议分支策略
 
 - 建议分支名：`feat/openai-responses-compat`
