@@ -183,6 +183,10 @@ pub fn extract_responses_event_type(event_json: &Value) -> Option<&str> {
 pub fn extract_responses_error_message(event_json: &Value) -> Option<String> {
     let error = event_json.get("error")?;
 
+    if error.is_null() {
+        return None;
+    }
+
     if let Some(message) = error.get("message").and_then(|value| value.as_str()) {
         return Some(message.to_string());
     }
@@ -256,5 +260,15 @@ mod tests {
             extract_responses_error_message(&event).as_deref(),
             Some("provider error")
         );
+    }
+
+    #[test]
+    fn returns_none_for_null_error_field() {
+        let event = serde_json::json!({
+            "type": "response.output_text.delta",
+            "error": null
+        });
+
+        assert_eq!(extract_responses_error_message(&event), None);
     }
 }
