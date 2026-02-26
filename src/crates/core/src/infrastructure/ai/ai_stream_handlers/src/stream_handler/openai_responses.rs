@@ -26,10 +26,7 @@ fn resolve_call_id(
     }
 
     if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
-        return call_id_by_item_id
-            .get(item_id)
-            .cloned()
-            .or_else(|| Some(item_id.to_string()));
+        return call_id_by_item_id.get(item_id).cloned();
     }
 
     None
@@ -403,7 +400,7 @@ mod tests {
         let map = HashMap::new();
 
         let resolved = resolve_call_id(None, Some("item_only"), &map);
-        assert_eq!(resolved.as_deref(), Some("item_only"));
+        assert_eq!(resolved, None);
     }
 
     #[test]

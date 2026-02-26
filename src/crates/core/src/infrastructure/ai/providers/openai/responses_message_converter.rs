@@ -21,7 +21,7 @@ impl OpenAIResponsesMessageConverter {
                 msg.content,
             )],
             "assistant" => Self::build_assistant_items(msg),
-            "tool" => vec![Self::build_tool_output_item(msg)],
+            "tool" => Self::build_tool_output_item(msg).into_iter().collect(),
             _ => {
                 warn!("[OpenAI Responses] Unknown message role: {}", msg.role);
                 vec![Self::build_role_message_item(
@@ -116,25 +116,20 @@ impl OpenAIResponsesMessageConverter {
         items
     }
 
-    fn build_tool_output_item(msg: Message) -> Value {
-        let call_id = msg
-            .tool_call_id
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| {
-                warn!(
-                    "[OpenAI Responses] Empty tool_call_id in tool message, using fallback call_id"
-                );
-                "call_missing".to_string()
-            });
+    fn build_tool_output_item(msg: Message) -> Option<Value> {
+        let Some(call_id) = msg.tool_call_id.filter(|id| !id.trim().is_empty()) else {
+            warn!("[OpenAI Responses] Skipping tool output item because tool_call_id is missing");
+            return None;
+        };
         let output = msg
             .content
             .unwrap_or_else(|| "Tool execution completed".to_string());
 
-        json!({
+        Some(json!({
             "type": "function_call_output",
             "call_id": call_id,
             "output": output,
-        })
+        }))
     }
 
     pub fn convert_tools(tools: Option<Vec<ToolDefinition>>) -> Option<Vec<Value>> {
@@ -250,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_input_replaces_empty_tool_message_call_id_with_fallback() {
+    fn convert_input_skips_tool_message_when_tool_call_id_is_empty() {
         let messages = vec![Message {
             role: "tool".to_string(),
             content: Some("ok".to_string()),
@@ -262,9 +257,7 @@ mod tests {
         }];
 
         let input = OpenAIResponsesMessageConverter::convert_input(messages);
-        assert_eq!(input.len(), 1);
-        assert_eq!(input[0]["type"], "function_call_output");
-        assert_eq!(input[0]["call_id"], "call_missing");
+        assert!(input.is_empty());
     }
 
     #[test]
