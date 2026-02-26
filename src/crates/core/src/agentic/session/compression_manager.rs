@@ -2,10 +2,11 @@
 //!
 //! Responsible for managing session context compression
 
-use crate::agentic::core::{Message, MessageHelper, MessageRole};
+use crate::agentic::core::{Message, MessageContent, MessageHelper, MessageRole};
 use crate::agentic::persistence::PersistenceManager;
 use crate::infrastructure::ai::{get_global_ai_client_factory, AIClient};
 use crate::util::errors::{BitFunError, BitFunResult};
+use crate::util::token_counter::TokenCounter;
 use crate::util::types::Message as AIMessage;
 use anyhow;
 use dashmap::DashMap;
@@ -452,15 +453,13 @@ Be thorough and precise. Do not lose important technical details from either the
         messages: Vec<Message>,
         max_tries: usize,
     ) -> BitFunResult<String> {
-        // Call AI to generate summary
-        let mut summary_messages = vec![AIMessage::from(system_message_for_summary)];
-        // Remove thinking process when summarizing
-        summary_messages.extend(messages.iter().map(|m| {
-            let mut ai_msg = AIMessage::from(m);
-            ai_msg.reasoning_content = None;
-            ai_msg
-        }));
-        summary_messages.push(AIMessage::user(self.get_compact_prompt()));
+        let context_window = ai_client.config.context_window as usize;
+        let summary_request_budget =
+            (context_window as f32 * self.config.single_request_max_tokens_ratio) as usize;
+
+        let mut summary_messages =
+            self.build_summary_request_messages(system_message_for_summary, messages, summary_request_budget);
+        let mut saw_context_overflow_error = false;
 
         let mut last_error = None;
         let base_wait_time_ms = 500;
@@ -486,6 +485,10 @@ Be thorough and precise. Do not lose important technical details from either the
                         max_tries,
                         e
                     );
+                    if Self::is_context_window_exceeded_error_message(&e.to_string()) {
+                        saw_context_overflow_error = true;
+                        self.shrink_summary_request_messages(&mut summary_messages);
+                    }
                     last_error = Some(e);
 
                     // If not the last attempt, wait before retrying
@@ -498,6 +501,14 @@ Be thorough and precise. Do not lose important technical details from either the
             }
         }
 
+        if saw_context_overflow_error {
+            warn!(
+                "Summary generation exceeded context budget after {} attempts, using deterministic fallback summary",
+                max_tries
+            );
+            return Ok(self.generate_fallback_summary(&summary_messages));
+        }
+
         // All attempts failed
         let error_msg = format!(
             "Summary generation failed after {} attempts: {}",
@@ -506,6 +517,190 @@ Be thorough and precise. Do not lose important technical details from either the
         );
         warn!("{}", error_msg);
         Err(BitFunError::AIClient(error_msg))
+    }
+
+    fn build_summary_request_messages(
+        &self,
+        system_message_for_summary: Message,
+        messages: Vec<Message>,
+        summary_request_budget: usize,
+    ) -> Vec<AIMessage> {
+        let mut cleaned_messages = Self::normalize_messages_for_summary(messages);
+
+        let mut summary_messages =
+            self.compose_summary_messages(AIMessage::from(system_message_for_summary), &cleaned_messages, true);
+        if Self::estimate_summary_request_tokens(&summary_messages) <= summary_request_budget {
+            return summary_messages;
+        }
+
+        summary_messages = self.compose_summary_messages(
+            summary_messages
+                .first()
+                .cloned()
+                .unwrap_or_else(|| AIMessage::system("You summarize conversations.".to_string())),
+            &cleaned_messages,
+            false,
+        );
+        while Self::estimate_summary_request_tokens(&summary_messages) > summary_request_budget
+            && !cleaned_messages.is_empty()
+        {
+            cleaned_messages.remove(0);
+            let system_message = summary_messages
+                .first()
+                .cloned()
+                .unwrap_or_else(|| AIMessage::system("You summarize conversations.".to_string()));
+            summary_messages =
+                self.compose_summary_messages(system_message, &cleaned_messages, false);
+        }
+
+        summary_messages
+    }
+
+    fn normalize_messages_for_summary(messages: Vec<Message>) -> Vec<AIMessage> {
+        messages
+            .iter()
+            .filter_map(Self::normalize_single_message_for_summary)
+            .collect()
+    }
+
+    fn normalize_single_message_for_summary(message: &Message) -> Option<AIMessage> {
+        let content = Self::render_message_content_for_summary(message);
+        if content.trim().is_empty() {
+            return None;
+        }
+
+        match message.role {
+            MessageRole::Assistant => Some(AIMessage::assistant(content)),
+            MessageRole::System => Some(AIMessage::system(content)),
+            MessageRole::User | MessageRole::Tool => Some(AIMessage::user(content)),
+        }
+    }
+
+    fn render_message_content_for_summary(message: &Message) -> String {
+        match &message.content {
+            MessageContent::Text(text) => text.trim().to_string(),
+            MessageContent::Mixed {
+                reasoning_content: _,
+                text,
+                tool_calls,
+            } => {
+                if tool_calls.is_empty() {
+                    return text.trim().to_string();
+                }
+
+                let tool_names = tool_calls
+                    .iter()
+                    .map(|call| call.tool_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let trimmed_text = text.trim();
+                if trimmed_text.is_empty() {
+                    format!("Assistant invoked tools: {}", tool_names)
+                } else {
+                    format!("{}\nAssistant invoked tools: {}", trimmed_text, tool_names)
+                }
+            }
+            MessageContent::ToolResult {
+                tool_name,
+                result,
+                result_for_assistant,
+                is_error,
+                ..
+            } => {
+                let payload = result_for_assistant
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| result.to_string());
+                let status = if *is_error { "error" } else { "result" };
+                format!("Tool {} {}:\n{}", tool_name, status, payload)
+            }
+        }
+    }
+
+    fn compose_summary_messages(
+        &self,
+        system_message: AIMessage,
+        cleaned_messages: &[AIMessage],
+        use_detailed_prompt: bool,
+    ) -> Vec<AIMessage> {
+        let mut summary_messages = vec![system_message];
+        summary_messages.extend(cleaned_messages.iter().cloned());
+        let prompt = if use_detailed_prompt {
+            self.get_compact_prompt()
+        } else {
+            self.get_compact_prompt_minimal()
+        };
+        summary_messages.push(AIMessage::user(prompt));
+        summary_messages
+    }
+
+    fn shrink_summary_request_messages(&self, summary_messages: &mut Vec<AIMessage>) {
+        if summary_messages.len() > 3 {
+            summary_messages.remove(1);
+            return;
+        }
+
+        if let Some(last_message) = summary_messages.last_mut() {
+            if let Some(content) = &mut last_message.content {
+                if content.len() > 600 {
+                    content.truncate(600);
+                }
+            }
+        }
+    }
+
+    fn estimate_summary_request_tokens(summary_messages: &[AIMessage]) -> usize {
+        TokenCounter::estimate_request_tokens(summary_messages, None)
+    }
+
+    fn is_context_window_exceeded_error_message(error_message: &str) -> bool {
+        let msg = error_message.to_lowercase();
+        msg.contains("context_length_exceeded")
+            || msg.contains("exceeds the context window")
+            || msg.contains("maximum context length")
+            || msg.contains("prompt is too long")
+    }
+
+    fn generate_fallback_summary(&self, summary_messages: &[AIMessage]) -> String {
+        let mut snippets = Vec::new();
+
+        for message in summary_messages.iter().rev() {
+            if message.role == "system" {
+                continue;
+            }
+
+            let Some(content) = &message.content else {
+                continue;
+            };
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let excerpt = if trimmed.chars().count() > 280 {
+                let mut clipped = trimmed.chars().take(280).collect::<String>();
+                clipped.push_str("...");
+                clipped
+            } else {
+                trimmed.to_string()
+            };
+
+            snippets.push(format!("- {}: {}", message.role, excerpt));
+            if snippets.len() >= 8 {
+                break;
+            }
+        }
+
+        snippets.reverse();
+        if snippets.is_empty() {
+            return "Previous conversation was compressed due to context limits. Continue from the latest user request and preserve recent task progress.".to_string();
+        }
+
+        format!(
+            "Previous conversation was compressed due to context limits. Keep continuity using these recent highlights:\n{}",
+            snippets.join("\n")
+        )
     }
 
     /// Delete session compression history
@@ -603,5 +798,48 @@ Here's an example of how your output should be structured:
 
 Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response. 
 "#.to_string()
+    }
+
+    fn get_compact_prompt_minimal(&self) -> String {
+        "Summarize the conversation for engineering continuation. Keep only critical facts: user requests, implemented changes, key file paths, errors and fixes, pending tasks, and the immediate next step. Output concise structured bullets."
+            .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompressionManager;
+    use crate::agentic::core::{Message, ToolCall, ToolResult};
+
+    #[test]
+    fn summary_normalization_eliminates_tool_protocol_messages() {
+        let assistant_with_tool = Message::assistant_with_tools(
+            "".to_string(),
+            vec![ToolCall {
+                tool_id: "call_1".to_string(),
+                tool_name: "grep".to_string(),
+                arguments: serde_json::json!({"pattern":"foo"}),
+                is_error: false,
+                should_end_turn: false,
+            }],
+        );
+        let tool_result = Message::tool_result(ToolResult {
+            tool_id: "call_1".to_string(),
+            tool_name: "grep".to_string(),
+            result: serde_json::json!({"matches": 1}),
+            result_for_assistant: Some("found 1 match".to_string()),
+            is_error: false,
+            duration_ms: None,
+        });
+
+        let normalized = CompressionManager::normalize_messages_for_summary(vec![
+            assistant_with_tool,
+            tool_result,
+        ]);
+
+        assert_eq!(normalized.len(), 2);
+        assert!(normalized.iter().all(|msg| msg.role != "tool"));
+        assert!(normalized.iter().all(|msg| msg.tool_calls.is_none()));
+        assert!(normalized.iter().all(|msg| msg.tool_call_id.is_none()));
     }
 }
